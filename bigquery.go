@@ -6,10 +6,6 @@ import (
 	"encoding/json"
 	"strings"
 	"fmt"
-	"crypto/md5"
-	"encoding/base32"
-	"strconv"
-	"hash"
 	"io"
 )
 
@@ -45,6 +41,7 @@ func writeLog(format string, v ...interface{}) {
 
 // A client for BigQuery.
 type Client struct {
+	InsertId string
 	iss string
 	pem []byte
 	service *bq.Service
@@ -154,7 +151,7 @@ func (w *Client) flushQueue(key string, queue chan *insertRows) (int, error) {
 		req := newTableDataInsertAllRequest(key)
 		for len(queue) > 0 {
 			rows := <-queue
-			err := req.put(rows)
+			err := w.put(req, rows)
 			if err != nil {
 				// put the rows to queue for retrying
 				queue <- rows
@@ -245,16 +242,7 @@ func newTableDataInsertAllRequest(key string) *tableDataInsertAllRequest {
 	}
 }
 
-func getInsertId(h hash.Hash, b string) string {
-	h.Write([]byte(b))
-	d := h.Sum(nil)
-	s := base32.StdEncoding.EncodeToString(d)
-	s = strings.TrimRight(s, "=")
-	s = strings.ToLower(s)
-	return s
-}
-
-func (r *tableDataInsertAllRequest) put(rows *insertRows) error {
+func (c *Client) put(r *tableDataInsertAllRequest, rows *insertRows) error {
 	arr, err := rows.decode()
 	if err != nil {
 		writeLog("request error %v", err)
@@ -275,25 +263,32 @@ func (r *tableDataInsertAllRequest) put(rows *insertRows) error {
 		return ErrRequestFull
 	}
 
-	// InsertId is based on hash of raw body and index of rows.
-	h := md5.New()
-	h.Write(rows.Body)
-
-	for idx, obj := range arr {
+	for _, obj := range arr {
+		var iid string
 		var j map[string]bq.JsonValue
 		switch row := obj.(type) {
 		case map[string]interface{}:
 			j = make(map[string]bq.JsonValue)
 			for k, v := range row {
-				j[k] = bq.JsonValue(v)
+				if c.InsertId != "" && k == c.InsertId {
+					iid, _ = v.(string)
+				} else {
+					j[k] = bq.JsonValue(v)
+				}
 			}
 		case map[string]bq.JsonValue:
+			if c.InsertId != "" {
+				iid2, ok := row[c.InsertId]
+				if ok {
+					iid, _ = iid2.(string)
+					delete(row, c.InsertId)
+				}
+			}
 			j = row
 		default:
 			writeLog("row is invalid %v %T", obj, obj)
 			return fmt.Errorf("row is invalid %v", obj)
 		}
-		iid := getInsertId(h, strconv.Itoa(idx))
 		writeLog("InsertId %s", iid)
 		bqRow := &bq.TableDataInsertAllRequestRows{InsertId: iid, Json: j}
 		r.request.Rows = append(r.request.Rows, bqRow)
