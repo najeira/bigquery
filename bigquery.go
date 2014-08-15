@@ -117,6 +117,7 @@ func (w *Client) insertAll(r *tableDataInsertAllRequest) error {
 		writeLog("insertAll error %v", err)
 		return err
 	}
+	writeLog("insertAll sent")
 	for _, ie := range resp.InsertErrors {
 		iee := ie.Errors
 		row := r.request.Rows[ie.Index]
@@ -162,6 +163,7 @@ func (w *Client) flushQueue(key string, queue chan *insertRows) (int, error) {
 				break
 			}
 		}
+		writeLog("request has %d rows %d bytes", len(req.request.Rows), req.size)
 
 		err = w.insertAll(req)
 		if err != nil {
@@ -289,14 +291,14 @@ func (c *Client) put(r *tableDataInsertAllRequest, rows *insertRows) error {
 			writeLog("row is invalid %v %T", obj, obj)
 			return fmt.Errorf("row is invalid %v", obj)
 		}
-		writeLog("InsertId %s", iid)
+		if iid != "" {
+			writeLog("InsertId %s", iid)
+		}
 		bqRow := &bq.TableDataInsertAllRequestRows{InsertId: iid, Json: j}
 		r.request.Rows = append(r.request.Rows, bqRow)
 	}
 
 	r.rowsArray = append(r.rowsArray, rows)
 	r.size += len(rows.Body)
-
-	writeLog("request has %d rows %d bytes", len(r.request.Rows), r.size)
 	return nil
 }
