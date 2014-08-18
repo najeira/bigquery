@@ -5,7 +5,7 @@ import (
 	bq "code.google.com/p/google-api-go-client/bigquery/v2"
 	"encoding/json"
 	"fmt"
-	"io"
+	//"io"
 	"strings"
 )
 
@@ -21,31 +21,17 @@ const (
 
 var (
 	ErrRequestFull error = fmt.Errorf("request is full")
-	logger         io.Writer
+	//logger         io.Writer
 )
-
-// Sets a logger.
-func SetLogger(l io.Writer) {
-	logger = l
-}
-
-func writeLog(format string, v ...interface{}) {
-	if logger != nil {
-		msg := "bigquery: " + fmt.Sprintf(format, v...)
-		logger.Write([]byte(msg))
-		if len(format) > 0 && format[len(format)-1] != '\n' {
-			logger.Write([]byte("\n"))
-		}
-	}
-}
 
 // A client for BigQuery.
 type Client struct {
-	InsertId string
-	iss      string
-	pem      []byte
-	service  *bq.Service
-	queues   map[string]chan *insertRows
+	InsertId     string
+	iss          string
+	pem          []byte
+	service      *bq.Service
+	queues       map[string]chan *insertRows
+	InsertErrors chan *InsertError
 }
 
 // Creates and returns a new Client.
@@ -63,12 +49,12 @@ func (w *Client) Add(project, dataset, table string, body []byte) {
 	key := rows.key()
 	queue, ok := w.queues[key]
 	if !ok {
-		writeLog("new queue %s", key)
+		//writeLog("new queue %s", key)
 		queue = make(chan *insertRows, 10000)
 		w.queues[key] = queue
 	}
 	queue <- rows
-	writeLog("new rows %s %d bytes", key, len(body))
+	//writeLog("new rows %s %d bytes", key, len(body))
 }
 
 // Sends added data to BigQuery.
@@ -96,17 +82,17 @@ func (w *Client) connect() error {
 	token := jwt.NewToken(w.iss, scope, w.pem)
 	transport, err := jwt.NewTransport(token)
 	if err != nil {
-		writeLog("connect error %v", err)
+		//writeLog("connect error %v", err)
 		return err
 	}
 	client := transport.Client()
 	bq, err := bq.New(client)
 	if err != nil {
-		writeLog("connect error %v", err)
+		//writeLog("connect error %v", err)
 		return err
 	}
 	w.service = bq
-	writeLog("connected")
+	//writeLog("connected")
 	return nil
 }
 
@@ -114,16 +100,34 @@ func (w *Client) insertAll(r *tableDataInsertAllRequest) error {
 	call := w.service.Tabledata.InsertAll(r.project, r.dataset, r.table, r.request)
 	resp, err := call.Do()
 	if err != nil {
-		writeLog("insertAll error %v", err)
+		//writeLog("insertAll error %v", err)
 		return err
 	}
-	writeLog("insertAll sent")
-	for _, ie := range resp.InsertErrors {
-		iee := ie.Errors
-		row := r.request.Rows[ie.Index]
-		for _, ep := range iee {
-			rowb, _ := json.Marshal(row.Json)
-			writeLog("insertAll error %s %s at %s", ep.Reason, ep.Message, string(rowb))
+	//writeLog("insertAll sent")
+	if w.InsertErrors != nil {
+		for _, ie := range resp.InsertErrors {
+			iee := ie.Errors
+			row := r.request.Rows[ie.Index]
+			ret := &InsertError{Errors: iee, Row: row}
+			w.InsertErrors <- ret
+		}
+	}
+	return nil
+}
+
+func (w *Client) putRowsToRequestFromQueue(
+	req *tableDataInsertAllRequest, queue chan *insertRows) error {
+	for len(queue) > 0 {
+		rows := <-queue
+		err := w.put(req, rows)
+		if err != nil {
+			// put the rows to queue for retrying
+			queue <- rows
+
+			if err != ErrRequestFull {
+				return err
+			}
+			break
 		}
 	}
 	return nil
@@ -136,10 +140,10 @@ func (w *Client) flushQueue(key string, queue chan *insertRows) (int, error) {
 	for len(queue) > 0 {
 
 		if totalRows >= MaxRowsCountPerCall {
-			writeLog("insertAll reached limit rows %d", totalRows)
+			//writeLog("insertAll reached limit rows %d", totalRows)
 			return totalRows, nil
 		} else if totalBytes >= MaxBytesPerCall {
-			writeLog("insertAll reached limit bytes %d", totalRows)
+			//writeLog("insertAll reached limit bytes %d", totalRows)
 			return totalRows, nil
 		}
 
@@ -150,20 +154,8 @@ func (w *Client) flushQueue(key string, queue chan *insertRows) (int, error) {
 		}
 
 		req := newTableDataInsertAllRequest(key)
-		for len(queue) > 0 {
-			rows := <-queue
-			err := w.put(req, rows)
-			if err != nil {
-				// put the rows to queue for retrying
-				queue <- rows
-
-				if err != ErrRequestFull {
-					return totalRows, err
-				}
-				break
-			}
-		}
-		writeLog("request has %d rows %d bytes", len(req.request.Rows), req.size)
+		w.putRowsToRequestFromQueue(req, queue)
+		//writeLog("request has %d rows %d bytes", len(req.request.Rows), req.size)
 
 		err = w.insertAll(req)
 		if err != nil {
@@ -181,7 +173,7 @@ func (w *Client) flushQueue(key string, queue chan *insertRows) (int, error) {
 		}
 	}
 
-	writeLog("insertAll %d rows %d bytes", totalRows, totalBytes)
+	//writeLog("insertAll %d rows %d bytes", totalRows, totalBytes)
 	return totalRows, nil
 }
 
@@ -200,7 +192,7 @@ func (r *insertRows) decode() ([]interface{}, error) {
 	var v interface{}
 	err := json.Unmarshal(r.Body, &v)
 	if err != nil {
-		writeLog("json decode error %v", err)
+		//writeLog("json decode error %v", err)
 		return nil, err
 	}
 
@@ -247,21 +239,17 @@ func newTableDataInsertAllRequest(key string) *tableDataInsertAllRequest {
 func (c *Client) put(r *tableDataInsertAllRequest, rows *insertRows) error {
 	arr, err := rows.decode()
 	if err != nil {
-		writeLog("request error %v", err)
+		//writeLog("request error %v", err)
 		return err
 	}
 
 	if len(r.request.Rows)+len(arr) >= MaxRowsCountPerRequest {
-		writeLog("request full count %d + %d", len(r.request.Rows), len(arr))
+		//writeLog("request full count %d + %d", len(r.request.Rows), len(arr))
 		return ErrRequestFull
 	}
 
-	// A request body has overhead of InsertIds
-	// example: "InsertId": "bghwxtkgehjxhsw6j2bsmj5u6y",
-	overhead := 100 * len(arr)
-
-	if r.size+len(rows.Body)+overhead >= MaxRequestSize {
-		writeLog("request full size %d + %d", r.size, len(rows.Body))
+	if r.size+len(rows.Body) >= MaxRequestSize {
+		//writeLog("request full size %d + %d", r.size, len(rows.Body))
 		return ErrRequestFull
 	}
 
@@ -288,11 +276,11 @@ func (c *Client) put(r *tableDataInsertAllRequest, rows *insertRows) error {
 			}
 			j = row
 		default:
-			writeLog("row is invalid %v %T", obj, obj)
+			//writeLog("row is invalid %v %T", obj, obj)
 			return fmt.Errorf("row is invalid %v", obj)
 		}
 		if iid != "" {
-			writeLog("InsertId %s", iid)
+			//writeLog("InsertId %s", iid)
 		}
 		bqRow := &bq.TableDataInsertAllRequestRows{InsertId: iid, Json: j}
 		r.request.Rows = append(r.request.Rows, bqRow)
@@ -301,4 +289,9 @@ func (c *Client) put(r *tableDataInsertAllRequest, rows *insertRows) error {
 	r.rowsArray = append(r.rowsArray, rows)
 	r.size += len(rows.Body)
 	return nil
+}
+
+type InsertError struct {
+	Errors []*bq.ErrorProto
+	Row    *bq.TableDataInsertAllRequestRows
 }
