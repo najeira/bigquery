@@ -168,8 +168,8 @@ func (w *Client) flushQueue(key string, queue chan *insertRows) (int, error) {
 			break
 
 		} else {
-			totalRows = len(req.request.Rows)
-			totalBytes = req.size
+			totalRows += len(req.request.Rows)
+			totalBytes += req.size
 		}
 	}
 
