@@ -105,12 +105,14 @@ func (w *Client) insertAll(r *tableDataInsertAllRequest) error {
 	}
 	//writeLog("insertAll sent")
 	if w.InsertErrors != nil {
-		for _, ie := range resp.InsertErrors {
-			iee := ie.Errors
-			row := r.request.Rows[ie.Index]
-			ret := &InsertError{Errors: iee, Row: row}
-			w.InsertErrors <- ret
-		}
+		go func(){
+			for _, ie := range resp.InsertErrors {
+				iee := ie.Errors
+				row := r.request.Rows[ie.Index]
+				ret := &InsertError{Errors: iee, Row: row}
+				w.InsertErrors <- ret
+			}
+		}()
 	}
 	return nil
 }
@@ -122,8 +124,9 @@ func (w *Client) putRowsToRequestFromQueue(
 		err := w.put(req, rows)
 		if err != nil {
 			// put the rows to queue for retrying
-			queue <- rows
-
+			go func () {
+				queue <- rows
+			}()
 			if err != ErrRequestFull {
 				return err
 			}
@@ -137,7 +140,7 @@ func (w *Client) flushQueue(key string, queue chan *insertRows) (int, error) {
 	totalRows := 0
 	totalBytes := 0
 
-	for len(queue) > 0 {
+	if len(queue) > 0 {
 
 		if totalRows >= MaxRowsCountPerCall {
 			//writeLog("insertAll reached limit rows %d", totalRows)
@@ -160,12 +163,14 @@ func (w *Client) flushQueue(key string, queue chan *insertRows) (int, error) {
 		err = w.insertAll(req)
 		if err != nil {
 			// it may be HTTP error. retry.
-			for _, rows := range req.rowsArray {
-				queue <- rows
-			}
+			go func () {
+				for _, rows := range req.rowsArray {
+					queue <- rows
+				}
+			}()
 
 			// does not retry now.
-			break
+			//break
 
 		} else {
 			totalRows += len(req.request.Rows)
