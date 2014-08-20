@@ -49,7 +49,7 @@ func Test_newTableDataInsertAllRequest(t *testing.T) {
 		{"name": "Bob", "city": "Osaka"}
 	]`)
 	rows := &insertRows{Project: "project", Dataset: "dataset", Table: "table", Body: body}
-	
+
 	r := newTableDataInsertAllRequest(rows.key())
 	if r == nil {
 		t.Error("newTableDataInsertAllRequest returns nil")
@@ -81,7 +81,7 @@ func Test_Client_Add(t *testing.T) {
 		{"name": "Alice", "city": "Tokyo"},
 		{"name": "Bob", "city": "Osaka"}
 	]`))
-	
+
 	if c.queues == nil {
 		t.Error("queues is nil")
 	}
@@ -93,7 +93,7 @@ func Test_Client_Add(t *testing.T) {
 	if q == nil {
 		t.Error("queue is nil")
 	}
-	if len(q) != 1 {
+	if q.Length() != 1 {
 		t.Error("queue has invalid length")
 	}
 
@@ -101,7 +101,7 @@ func Test_Client_Add(t *testing.T) {
 		{"name": "Alice", "city": "Tokyo"},
 		{"name": "Bob", "city": "Osaka"}
 	]`))
-	if len(q) != 2 {
+	if q.Length() != 2 {
 		t.Error("queue has invalid length")
 	}
 }
@@ -109,7 +109,7 @@ func Test_Client_Add(t *testing.T) {
 func Test_Client_putRowsToRequestFromQueue(t *testing.T) {
 	rows := &insertRows{Project: "project", Dataset: "dataset", Table: "table", Body: nil}
 	req := newTableDataInsertAllRequest(rows.key())
-	
+
 	c := New("", nil)
 	c.Add("project", "dataset", "table", []byte(`[
 		{"name": "Alice", "city": "Tokyo"},
@@ -120,7 +120,7 @@ func Test_Client_putRowsToRequestFromQueue(t *testing.T) {
 		{"name": "Jiro", "city": "Kyoto"}
 	]`))
 	c.putRowsToRequestFromQueue(req, c.queues[rows.key()])
-	
+
 	if req.project != "project" {
 		t.Error("invalid project")
 	}

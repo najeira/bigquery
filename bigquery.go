@@ -5,6 +5,7 @@ import (
 	bq "code.google.com/p/google-api-go-client/bigquery/v2"
 	"encoding/json"
 	"fmt"
+	"github.com/najeira/goutils/queue"
 	//"io"
 	"strings"
 )
@@ -30,7 +31,7 @@ type Client struct {
 	iss          string
 	pem          []byte
 	service      *bq.Service
-	queues       map[string]chan *insertRows
+	queues       map[string]*queue.Queue
 	InsertErrors chan *InsertError
 }
 
@@ -39,7 +40,7 @@ func New(iss string, pem []byte) *Client {
 	return &Client{
 		iss:    iss,
 		pem:    pem,
-		queues: make(map[string]chan *insertRows),
+		queues: make(map[string]*queue.Queue),
 	}
 }
 
@@ -47,21 +48,21 @@ func New(iss string, pem []byte) *Client {
 func (w *Client) Add(project, dataset, table string, body []byte) {
 	rows := &insertRows{Project: project, Dataset: dataset, Table: table, Body: body}
 	key := rows.key()
-	queue, ok := w.queues[key]
+	q, ok := w.queues[key]
 	if !ok {
 		//writeLog("new queue %s", key)
-		queue = make(chan *insertRows, 10000)
-		w.queues[key] = queue
+		q = queue.New()
+		w.queues[key] = q
 	}
-	queue <- rows
+	q.Add(rows)
 	//writeLog("new rows %s %d bytes", key, len(body))
 }
 
 // Sends added data to BigQuery.
 func (w *Client) Send() (int, error) {
 	sent := 0
-	for key, queue := range w.queues {
-		n, err := w.flushQueue(key, queue)
+	for key, q := range w.queues {
+		n, err := w.flushQueue(key, q)
 		sent += n
 		if err != nil {
 			return sent, err
@@ -105,7 +106,7 @@ func (w *Client) insertAll(r *tableDataInsertAllRequest) error {
 	}
 	//writeLog("insertAll sent")
 	if w.InsertErrors != nil {
-		go func(){
+		go func() {
 			for _, ie := range resp.InsertErrors {
 				iee := ie.Errors
 				row := r.request.Rows[ie.Index]
@@ -118,15 +119,17 @@ func (w *Client) insertAll(r *tableDataInsertAllRequest) error {
 }
 
 func (w *Client) putRowsToRequestFromQueue(
-	req *tableDataInsertAllRequest, queue chan *insertRows) error {
-	for len(queue) > 0 {
-		rows := <-queue
+	req *tableDataInsertAllRequest, q *queue.Queue) error {
+	for q.Length() > 0 {
+		obj := q.Pop()
+		rows, ok := obj.(*insertRows)
+		if !ok {
+			return fmt.Errorf("invalid item")
+		}
 		err := w.put(req, rows)
 		if err != nil {
 			// put the rows to queue for retrying
-			go func () {
-				queue <- rows
-			}()
+			q.Add(rows)
 			if err != ErrRequestFull {
 				return err
 			}
@@ -136,11 +139,11 @@ func (w *Client) putRowsToRequestFromQueue(
 	return nil
 }
 
-func (w *Client) flushQueue(key string, queue chan *insertRows) (int, error) {
+func (w *Client) flushQueue(key string, q *queue.Queue) (int, error) {
 	totalRows := 0
 	totalBytes := 0
 
-	if len(queue) > 0 {
+	if q.Length() > 0 {
 
 		if totalRows >= MaxRowsCountPerCall {
 			//writeLog("insertAll reached limit rows %d", totalRows)
@@ -157,17 +160,15 @@ func (w *Client) flushQueue(key string, queue chan *insertRows) (int, error) {
 		}
 
 		req := newTableDataInsertAllRequest(key)
-		w.putRowsToRequestFromQueue(req, queue)
+		w.putRowsToRequestFromQueue(req, q)
 		//writeLog("request has %d rows %d bytes", len(req.request.Rows), req.size)
 
 		err = w.insertAll(req)
 		if err != nil {
 			// it may be HTTP error. retry.
-			go func () {
-				for _, rows := range req.rowsArray {
-					queue <- rows
-				}
-			}()
+			for _, rows := range req.rowsArray {
+				q.Add(rows)
+			}
 
 			// does not retry now.
 			//break
