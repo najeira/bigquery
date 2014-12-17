@@ -77,6 +77,18 @@ func Test_New(t *testing.T) {
 
 func Test_Client_Add(t *testing.T) {
 	c := New("", nil)
+
+	if len(c.queues) != 0 {
+		t.Error("queues has invalid length")
+	}
+	q, ok := c.queues["project|dataset|table"]
+	if ok {
+		t.Error("queues has key before adding")
+	}
+	if q != nil {
+		t.Error("queues has key before adding")
+	}
+
 	c.Add("project", "dataset", "table", []byte(`[
 		{"name": "Alice", "city": "Tokyo"},
 		{"name": "Bob", "city": "Osaka"}
@@ -89,7 +101,10 @@ func Test_Client_Add(t *testing.T) {
 		t.Error("queues has invalid length")
 	}
 
-	q := c.queues["project|dataset|table"]
+	q, ok = c.queues["project|dataset|table"]
+	if !ok {
+		t.Error("queues does not have the key")
+	}
 	if q == nil {
 		t.Error("queue is nil")
 	}
@@ -103,6 +118,37 @@ func Test_Client_Add(t *testing.T) {
 	]`))
 	if q.Length() != 2 {
 		t.Error("queue has invalid length")
+	}
+}
+
+func Test_Client_getQueue(t *testing.T) {
+	c := New("", nil)
+	if len(c.queues) != 0 {
+		t.Error("queues has invalid length")
+	}
+
+	q := c.getQueue("foo")
+	if len(c.queues) != 1 {
+		t.Error("queues has invalid length")
+	}
+	foo := q
+
+	q = c.getQueue("bar")
+	if len(c.queues) != 2 {
+		t.Error("queues has invalid length")
+	}
+
+	q = c.getQueue("baz")
+	if len(c.queues) != 3 {
+		t.Error("queues has invalid length")
+	}
+
+	q = c.getQueue("foo")
+	if len(c.queues) != 3 {
+		t.Error("queues has invalid length")
+	}
+	if q != foo {
+		t.Error("invalid queue")
 	}
 }
 
