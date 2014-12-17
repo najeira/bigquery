@@ -8,6 +8,7 @@ import (
 	"github.com/najeira/goutils/queue"
 	//"io"
 	"strings"
+	"sync"
 )
 
 const (
@@ -31,8 +32,10 @@ type Client struct {
 	iss          string
 	pem          []byte
 	service      *bq.Service
-	queues       map[string]*queue.Queue
 	InsertErrors chan *InsertError
+
+	mu           sync.RWMutex
+	queues       map[string]*queue.Queue
 }
 
 // Creates and returns a new Client.
@@ -48,14 +51,29 @@ func New(iss string, pem []byte) *Client {
 func (w *Client) Add(project, dataset, table string, body []byte) {
 	rows := &insertRows{Project: project, Dataset: dataset, Table: table, Body: body}
 	key := rows.key()
-	q, ok := w.queues[key]
-	if !ok {
-		//writeLog("new queue %s", key)
-		q = queue.New()
-		w.queues[key] = q
-	}
+	q := w.getQueue(key)
 	q.Add(rows)
 	//writeLog("new rows %s %d bytes", key, len(body))
+}
+
+func (w *Client) getQueue(key string) *queue.Queue {
+	w.mu.RLock()
+	q, ok := w.queues[key]
+	w.mu.RUnlock()
+	if !ok {
+		w.mu.Lock()
+		q, ok := w.queues[key]
+		if !ok {
+			//writeLog("new queue %s", key)
+			q = queue.New()
+			w.queues[key] = q
+		}
+		w.mu.Unlock()
+	}
+	if q == nil {
+		panic("q is nil")
+	}
+	return q
 }
 
 // Sends added data to BigQuery.
