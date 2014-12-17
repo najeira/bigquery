@@ -5,8 +5,8 @@ import (
 	bq "code.google.com/p/google-api-go-client/bigquery/v2"
 	"encoding/json"
 	"fmt"
+	"github.com/najeira/goutils/nlog"
 	"github.com/najeira/goutils/queue"
-	//"io"
 	"strings"
 	"sync"
 )
@@ -23,7 +23,6 @@ const (
 
 var (
 	ErrRequestFull error = fmt.Errorf("request is full")
-	//logger         io.Writer
 )
 
 // A client for BigQuery.
@@ -32,6 +31,7 @@ type Client struct {
 	iss          string
 	pem          []byte
 	service      *bq.Service
+	logger       nlog.Logger
 	InsertErrors chan *InsertError
 
 	mu           sync.RWMutex
@@ -47,13 +47,23 @@ func New(iss string, pem []byte) *Client {
 	}
 }
 
+func (w *Client) SetLogger(logger nlog.Logger) {
+	w.logger = logger
+}
+
+func (w *Client) printf(level int, format string, v ...interface{}) {
+	if w.logger != nil {
+		w.logger.Printf(level, format, v...)
+	}
+}
+
 // Adds Tabledata.InsertAll data to the client.
 func (w *Client) Add(project, dataset, table string, body []byte) {
 	rows := &insertRows{Project: project, Dataset: dataset, Table: table, Body: body}
 	key := rows.key()
 	q := w.getQueue(key)
 	q.Add(rows)
-	//writeLog("new rows %s %d bytes", key, len(body))
+	w.printf(nlog.LogLevelDebug, "new rows %s %d bytes", key, len(body))
 }
 
 func (w *Client) getQueue(key string) *queue.Queue {
@@ -64,7 +74,7 @@ func (w *Client) getQueue(key string) *queue.Queue {
 		w.mu.Lock()
 		q, ok := w.queues[key]
 		if !ok {
-			//writeLog("new queue %s", key)
+			w.printf(nlog.LogLevelDebug, "new queue %s", key)
 			q = queue.New()
 			w.queues[key] = q
 		}
@@ -101,17 +111,17 @@ func (w *Client) connect() error {
 	token := jwt.NewToken(w.iss, scope, w.pem)
 	transport, err := jwt.NewTransport(token)
 	if err != nil {
-		//writeLog("connect error %v", err)
+		w.printf(nlog.LogLevelWarn, "connect error %v", err)
 		return err
 	}
 	client := transport.Client()
 	bq, err := bq.New(client)
 	if err != nil {
-		//writeLog("connect error %v", err)
+		w.printf(nlog.LogLevelWarn, "connect error %v", err)
 		return err
 	}
 	w.service = bq
-	//writeLog("connected")
+	w.printf(nlog.LogLevelDebug, "connected")
 	return nil
 }
 
@@ -119,10 +129,10 @@ func (w *Client) insertAll(r *tableDataInsertAllRequest) error {
 	call := w.service.Tabledata.InsertAll(r.project, r.dataset, r.table, r.request)
 	resp, err := call.Do()
 	if err != nil {
-		//writeLog("insertAll error %v", err)
+		w.printf(nlog.LogLevelWarn, "insertAll error %v", err)
 		return err
 	}
-	//writeLog("insertAll sent")
+	w.printf(nlog.LogLevelDebug, "insertAll sent")
 	if w.InsertErrors != nil {
 		go func() {
 			for _, ie := range resp.InsertErrors {
@@ -169,10 +179,10 @@ func (w *Client) flushQueue(key string, q *queue.Queue) (int, error) {
 	for q.Length() > 0 {
 
 		if totalRows >= MaxRowsCountPerCall {
-			//writeLog("insertAll reached limit rows %d", totalRows)
+			w.printf(nlog.LogLevelInfo, "insertAll reached limit rows %d", totalRows)
 			return totalRows, nil
 		} else if totalBytes >= MaxBytesPerCall {
-			//writeLog("insertAll reached limit bytes %d", totalRows)
+			w.printf(nlog.LogLevelInfo, "insertAll reached limit bytes %d", totalRows)
 			return totalRows, nil
 		}
 
@@ -189,7 +199,7 @@ func (w *Client) flushQueue(key string, q *queue.Queue) (int, error) {
 		} else if n <= 0 {
 			continue
 		}
-		//writeLog("request has %d rows %d bytes", len(req.request.Rows), req.size)
+		w.printf(nlog.LogLevelDebug, "request has %d rows %d bytes", len(req.request.Rows), req.size)
 
 		err = w.insertAll(req)
 		if err != nil {
@@ -207,24 +217,24 @@ func (w *Client) flushQueue(key string, q *queue.Queue) (int, error) {
 		}
 	}
 
-	//writeLog("insertAll %d rows %d bytes", totalRows, totalBytes)
+	w.printf(nlog.LogLevelDebug, "insertAll %d rows %d bytes", totalRows, totalBytes)
 	return totalRows, nil
 }
 
 func (c *Client) put(r *tableDataInsertAllRequest, rows *insertRows) (int, error) {
 	arr, err := rows.decode()
 	if err != nil {
-		//writeLog("request error %v", err)
+		c.printf(nlog.LogLevelWarn, "request error %v", err)
 		return 0, err
 	}
 
 	if len(r.request.Rows)+len(arr) >= MaxRowsCountPerRequest {
-		//writeLog("request full count %d + %d", len(r.request.Rows), len(arr))
+		c.printf(nlog.LogLevelInfo, "request full count %d + %d", len(r.request.Rows), len(arr))
 		return 0, ErrRequestFull
 	}
 
 	if r.size+len(rows.Body) >= MaxRequestSize {
-		//writeLog("request full size %d + %d", r.size, len(rows.Body))
+		c.printf(nlog.LogLevelInfo, "request full size %d + %d", r.size, len(rows.Body))
 		return 0, ErrRequestFull
 	}
 
@@ -252,11 +262,11 @@ func (c *Client) put(r *tableDataInsertAllRequest, rows *insertRows) (int, error
 			}
 			j = row
 		default:
-			//writeLog("row is invalid %v %T", obj, obj)
+			c.printf(nlog.LogLevelWarn, "row is invalid %v %T", obj, obj)
 			continue // ignore invalid row
 		}
 		if iid != "" {
-			//writeLog("InsertId %s", iid)
+			c.printf(nlog.LogLevelDebug, "InsertId %s", iid)
 		}
 		bqRow := &bq.TableDataInsertAllRequestRows{InsertId: iid, Json: j}
 		r.request.Rows = append(r.request.Rows, bqRow)
@@ -283,7 +293,6 @@ func (r *insertRows) decode() ([]interface{}, error) {
 	var v interface{}
 	err := json.Unmarshal(r.Body, &v)
 	if err != nil {
-		//writeLog("json decode error %v", err)
 		return nil, err
 	}
 
