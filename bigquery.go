@@ -9,6 +9,7 @@ import (
 	"github.com/najeira/goutils/queue"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -208,19 +209,28 @@ func (w *Client) flushQueue(key string, q *queue.Queue) (int, error) {
 
 		// insertAll send HTTP request internaly, it may take long time.
 		// use goroutine for concurrency
-		go func() {
-			err = w.insertAll(req)
-			if err != nil {
-				// it may be HTTP error. retry.
-				for _, rows := range req.rowsArray {
-					q.Add(rows)
-				}
-			}
-		}()
+		go w.send(req, q)
 	}
 
-	w.printf(nlog.LogLevelDebug, "insertAll %d rows %d bytes", totalRows, totalBytes)
+	if totalRows > 0 || totalBytes > 0 {
+		w.printf(nlog.LogLevelDebug, "insertAll %d rows %d bytes", totalRows, totalBytes)
+	}
 	return totalRows, nil
+}
+
+func (c *Client) send(r *tableDataInsertAllRequest, q *queue.Queue) {
+	start := time.Now()
+	err := c.insertAll(r)
+	elapsed := time.Since(start)
+	if err != nil {
+		// it may be HTTP error. retry.
+		if !strings.Contains(err.Error(), "Error 400") {
+			for _, rows := range r.rowsArray {
+				q.Add(rows)
+			}
+		}
+	}
+	c.printf(nlog.LogLevelInfo, "insertAll: %d rows, %d bytes, %.02f", len(r.request.Rows), r.size, elapsed.Seconds())
 }
 
 func (c *Client) put(r *tableDataInsertAllRequest, rows *insertRows) (int, error) {
