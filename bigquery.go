@@ -72,7 +72,7 @@ func (w *Client) getQueue(key string) *queue.Queue {
 	w.mu.RUnlock()
 	if !ok {
 		w.mu.Lock()
-		q, ok := w.queues[key]
+		q, ok = w.queues[key]
 		if !ok {
 			w.printf(nlog.LogLevelDebug, "new queue %s", key)
 			q = queue.New()
