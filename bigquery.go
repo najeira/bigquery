@@ -34,8 +34,8 @@ type Client struct {
 	logger       nlog.Logger
 	InsertErrors chan *InsertError
 
-	mu           sync.RWMutex
-	queues       map[string]*queue.Queue
+	mu     sync.RWMutex
+	queues map[string]*queue.Queue
 }
 
 // Creates and returns a new Client.
