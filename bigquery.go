@@ -201,20 +201,22 @@ func (w *Client) flushQueue(key string, q *queue.Queue) (int, error) {
 		}
 		w.printf(nlog.LogLevelDebug, "request has %d rows %d bytes", len(req.request.Rows), req.size)
 
-		err = w.insertAll(req)
-		if err != nil {
-			// it may be HTTP error. retry.
-			for _, rows := range req.rowsArray {
-				q.Add(rows)
+		// their counters should be incremented before next loop.
+		// add rows and bytes just now because the sending request is asynchronous.
+		totalRows += len(req.request.Rows)
+		totalBytes += req.size
+
+		// insertAll send HTTP request internaly, it may take long time.
+		// use goroutine for concurrency
+		go func() {
+			err = w.insertAll(req)
+			if err != nil {
+				// it may be HTTP error. retry.
+				for _, rows := range req.rowsArray {
+					q.Add(rows)
+				}
 			}
-
-			// does not retry now.
-			//break
-
-		} else {
-			totalRows += len(req.request.Rows)
-			totalBytes += req.size
-		}
+		}()
 	}
 
 	w.printf(nlog.LogLevelDebug, "insertAll %d rows %d bytes", totalRows, totalBytes)
