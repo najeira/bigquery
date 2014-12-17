@@ -136,32 +136,37 @@ func (w *Client) insertAll(r *tableDataInsertAllRequest) error {
 	return nil
 }
 
-func (w *Client) putRowsToRequestFromQueue(
-	req *tableDataInsertAllRequest, q *queue.Queue) error {
+func (w *Client) putRowsToRequestFromQueue(req *tableDataInsertAllRequest, q *queue.Queue) (int, error) {
+	count := 0
 	for q.Length() > 0 {
 		obj := q.Pop()
 		rows, ok := obj.(*insertRows)
 		if !ok {
-			return fmt.Errorf("invalid item")
+			return count, fmt.Errorf("invalid item")
 		}
-		err := w.put(req, rows)
+		n, err := w.put(req, rows)
 		if err != nil {
+			if n != 0 {
+				panic("n should be 0")
+			}
+			if err != ErrRequestFull {
+				return count, err
+			}
 			// put the rows to queue for retrying
 			q.Add(rows)
-			if err != ErrRequestFull {
-				return err
-			}
 			break
+		} else {
+			count += n
 		}
 	}
-	return nil
+	return count, nil
 }
 
 func (w *Client) flushQueue(key string, q *queue.Queue) (int, error) {
 	totalRows := 0
 	totalBytes := 0
 
-	if q.Length() > 0 {
+	for q.Length() > 0 {
 
 		if totalRows >= MaxRowsCountPerCall {
 			//writeLog("insertAll reached limit rows %d", totalRows)
@@ -178,7 +183,12 @@ func (w *Client) flushQueue(key string, q *queue.Queue) (int, error) {
 		}
 
 		req := newTableDataInsertAllRequest(key)
-		w.putRowsToRequestFromQueue(req, q)
+		n, err := w.putRowsToRequestFromQueue(req, q)
+		if err != nil {
+			continue
+		} else if n <= 0 {
+			continue
+		}
 		//writeLog("request has %d rows %d bytes", len(req.request.Rows), req.size)
 
 		err = w.insertAll(req)
@@ -199,6 +209,63 @@ func (w *Client) flushQueue(key string, q *queue.Queue) (int, error) {
 
 	//writeLog("insertAll %d rows %d bytes", totalRows, totalBytes)
 	return totalRows, nil
+}
+
+func (c *Client) put(r *tableDataInsertAllRequest, rows *insertRows) (int, error) {
+	arr, err := rows.decode()
+	if err != nil {
+		//writeLog("request error %v", err)
+		return 0, err
+	}
+
+	if len(r.request.Rows)+len(arr) >= MaxRowsCountPerRequest {
+		//writeLog("request full count %d + %d", len(r.request.Rows), len(arr))
+		return 0, ErrRequestFull
+	}
+
+	if r.size+len(rows.Body) >= MaxRequestSize {
+		//writeLog("request full size %d + %d", r.size, len(rows.Body))
+		return 0, ErrRequestFull
+	}
+
+	count := 0
+	for _, obj := range arr {
+		var iid string
+		var j map[string]bq.JsonValue
+		switch row := obj.(type) {
+		case map[string]interface{}:
+			j = make(map[string]bq.JsonValue)
+			for k, v := range row {
+				if c.InsertId != "" && k == c.InsertId {
+					iid, _ = v.(string)
+				} else {
+					j[k] = bq.JsonValue(v)
+				}
+			}
+		case map[string]bq.JsonValue:
+			if c.InsertId != "" {
+				iid2, ok := row[c.InsertId]
+				if ok {
+					iid, _ = iid2.(string)
+					delete(row, c.InsertId)
+				}
+			}
+			j = row
+		default:
+			//writeLog("row is invalid %v %T", obj, obj)
+			continue // ignore invalid row
+		}
+		if iid != "" {
+			//writeLog("InsertId %s", iid)
+		}
+		bqRow := &bq.TableDataInsertAllRequestRows{InsertId: iid, Json: j}
+		r.request.Rows = append(r.request.Rows, bqRow)
+		count += 1
+	}
+
+	r.rowsArray = append(r.rowsArray, rows)
+	r.size += len(rows.Body)
+	return count, nil
 }
 
 type insertRows struct {
@@ -258,61 +325,6 @@ func newTableDataInsertAllRequest(key string) *tableDataInsertAllRequest {
 			Rows: make([]*bq.TableDataInsertAllRequestRows, 0),
 		},
 	}
-}
-
-func (c *Client) put(r *tableDataInsertAllRequest, rows *insertRows) error {
-	arr, err := rows.decode()
-	if err != nil {
-		//writeLog("request error %v", err)
-		return err
-	}
-
-	if len(r.request.Rows)+len(arr) >= MaxRowsCountPerRequest {
-		//writeLog("request full count %d + %d", len(r.request.Rows), len(arr))
-		return ErrRequestFull
-	}
-
-	if r.size+len(rows.Body) >= MaxRequestSize {
-		//writeLog("request full size %d + %d", r.size, len(rows.Body))
-		return ErrRequestFull
-	}
-
-	for _, obj := range arr {
-		var iid string
-		var j map[string]bq.JsonValue
-		switch row := obj.(type) {
-		case map[string]interface{}:
-			j = make(map[string]bq.JsonValue)
-			for k, v := range row {
-				if c.InsertId != "" && k == c.InsertId {
-					iid, _ = v.(string)
-				} else {
-					j[k] = bq.JsonValue(v)
-				}
-			}
-		case map[string]bq.JsonValue:
-			if c.InsertId != "" {
-				iid2, ok := row[c.InsertId]
-				if ok {
-					iid, _ = iid2.(string)
-					delete(row, c.InsertId)
-				}
-			}
-			j = row
-		default:
-			//writeLog("row is invalid %v %T", obj, obj)
-			return fmt.Errorf("row is invalid %v", obj)
-		}
-		if iid != "" {
-			//writeLog("InsertId %s", iid)
-		}
-		bqRow := &bq.TableDataInsertAllRequestRows{InsertId: iid, Json: j}
-		r.request.Rows = append(r.request.Rows, bqRow)
-	}
-
-	r.rowsArray = append(r.rowsArray, rows)
-	r.size += len(rows.Body)
-	return nil
 }
 
 type InsertError struct {
