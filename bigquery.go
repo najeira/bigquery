@@ -13,11 +13,11 @@ import (
 )
 
 const (
-	MaxRowSize             = 20 * 1000
+	MaxRowSize             = 1 * 1000 * 1000
 	MaxRowsCountPerRequest = 500
-	MaxRequestSize         = 1 * 1000 * 1000
-	MaxRowsPerSecond       = 10000
-	MaxBytesPerSecond      = 10 * 1000 * 1000
+	MaxRequestSize         = 10 * 1000 * 1000
+	MaxRowsPerSecond       = 100000
+	MaxBytesPerSecond      = 100 * 1000 * 1000
 	MaxRowsCountPerCall    = MaxRowsPerSecond - MaxRowsCountPerRequest
 	MaxBytesPerCall        = MaxBytesPerSecond - MaxRequestSize
 )
