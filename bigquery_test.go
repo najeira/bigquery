@@ -1,6 +1,8 @@
 package bigquery
 
 import "testing"
+import "bytes"
+import "strconv"
 
 func Test_insertRows_key(t *testing.T) {
 	rows := &insertRows{Project: "project", Dataset: "dataset", Table: "table", Body: nil}
@@ -165,8 +167,14 @@ func Test_Client_putRowsToRequestFromQueue(t *testing.T) {
 		{"name": "Taro", "city": "Sapporo"},
 		{"name": "Jiro", "city": "Kyoto"}
 	]`))
-	c.putRowsToRequestFromQueue(req, c.queues[rows.key()])
+	n, err := c.putRowsToRequestFromQueue(req, c.queues[rows.key()])
 
+	if n != 4 {
+		t.Error("invalid n")
+	}
+	if err != nil {
+		t.Error(err.Error())
+	}
 	if req.project != "project" {
 		t.Error("invalid project")
 	}
@@ -209,6 +217,123 @@ func Test_Client_putRowsToRequestFromQueue(t *testing.T) {
 		}
 		if req.request.Rows[3].Json["city"] != "Kyoto" {
 			t.Error("invalid rows city")
+		}
+	}
+}
+
+func Test_Client_putRowsToRequestFromQueue_split(t *testing.T) {
+	rows := &insertRows{Project: "project", Dataset: "dataset", Table: "table", Body: nil}
+
+	var b bytes.Buffer
+	b.WriteString("[")
+	for i := 0; i < 510; i++ {
+		if i > 0 {
+			b.WriteString(`,`)
+		}
+		n := strconv.Itoa(i)
+		b.WriteString(`{"name": "Alice` + n + `", "city": "Tokyo` + n + `"}`)
+	}
+	b.WriteString("]")
+
+	c := New("", nil)
+	c.Add("project", "dataset", "table", b.Bytes())
+
+	req := newTableDataInsertAllRequest(rows.key())
+	n, err := c.putRowsToRequestFromQueue(req, c.queues[rows.key()])
+
+	if n != 0 {
+		t.Error("invalid n")
+	}
+	if err != nil {
+		t.Error(err.Error())
+	}
+	if req.project != "project" {
+		t.Error("invalid project")
+	}
+	if req.dataset != "dataset" {
+		t.Error("invalid dataset")
+	}
+	if req.table != "table" {
+		t.Error("invalid table")
+	}
+
+	req = newTableDataInsertAllRequest(rows.key())
+	n, err = c.putRowsToRequestFromQueue(req, c.queues[rows.key()])
+
+	if n != 255 {
+		t.Errorf("invalid returning count is %d", n)
+	}
+	if err != nil {
+		t.Error(err.Error())
+	}
+	if req.project != "project" {
+		t.Error("invalid project")
+	}
+	if req.dataset != "dataset" {
+		t.Error("invalid dataset")
+	}
+	if req.table != "table" {
+		t.Error("invalid table")
+	}
+
+	if req.rowsArray == nil {
+		t.Error("invalid rowsArray")
+	} else if len(req.rowsArray) != 1 {
+		t.Error("invalid rowsArray length")
+	}
+	if req.request == nil {
+		t.Error("invalid request")
+	} else if len(req.request.Rows) != 255 {
+		t.Error("invalid request length")
+	} else {
+		for i, row := range req.request.Rows {
+			n := strconv.Itoa(i)
+			if row.Json["name"] != "Alice"+n {
+				t.Error("invalid rows name")
+			}
+			if row.Json["city"] != "Tokyo"+n {
+				t.Error("invalid rows city")
+			}
+		}
+	}
+
+	req = newTableDataInsertAllRequest(rows.key())
+	n, err = c.putRowsToRequestFromQueue(req, c.queues[rows.key()])
+
+	if n != 255 {
+		t.Errorf("invalid returning count is %d", n)
+	}
+	if err != nil {
+		t.Error(err.Error())
+	}
+	if req.project != "project" {
+		t.Error("invalid project")
+	}
+	if req.dataset != "dataset" {
+		t.Error("invalid dataset")
+	}
+	if req.table != "table" {
+		t.Error("invalid table")
+	}
+
+	if req.rowsArray == nil {
+		t.Error("invalid rowsArray")
+	} else if len(req.rowsArray) != 2 {
+		t.Errorf("invalid rowsArray length is %d", len(req.rowsArray))
+	}
+	if req.request == nil {
+		t.Error("invalid request")
+	} else if len(req.request.Rows) != 255 {
+		t.Error("invalid request length")
+	} else {
+		for i, row := range req.request.Rows {
+			n := strconv.Itoa(i + 255)
+			if row.Json["name"] != "Alice"+n {
+				t.Error("invalid rows name")
+			}
+			if row.Json["city"] != "Tokyo"+n {
+				t.Error("invalid rows city")
+			}
 		}
 	}
 }

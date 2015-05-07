@@ -155,7 +155,7 @@ func (w *Client) putRowsToRequestFromQueue(req *tableDataInsertAllRequest, q *qu
 		if !ok {
 			return count, fmt.Errorf("invalid item")
 		}
-		n, err := w.put(req, rows)
+		n, err := w.putRows(req, rows)
 		if err != nil {
 			if n != 0 {
 				panic("n should be 0")
@@ -163,8 +163,6 @@ func (w *Client) putRowsToRequestFromQueue(req *tableDataInsertAllRequest, q *qu
 			if err != ErrRequestFull {
 				return count, err
 			}
-			// put the rows to queue for retrying
-			q.Add(rows)
 			break
 		} else {
 			count += n
@@ -233,20 +231,48 @@ func (c *Client) send(r *tableDataInsertAllRequest, q *queue.Queue) {
 	c.printf(nlog.LogLevelInfo, "insertAll: %d rows, %d bytes, %.02f", len(r.request.Rows), r.size, elapsed.Seconds())
 }
 
-func (c *Client) put(r *tableDataInsertAllRequest, rows *insertRows) (int, error) {
+func (c *Client) putRows(r *tableDataInsertAllRequest, rows *insertRows) (int, error) {
 	arr, err := rows.decode()
 	if err != nil {
 		c.printf(nlog.LogLevelWarn, "request error %v", err)
 		return 0, err
 	}
 
-	if len(r.request.Rows)+len(arr) >= MaxRowsCountPerRequest {
-		c.printf(nlog.LogLevelInfo, "request full count %d + %d", len(r.request.Rows), len(arr))
+	if r.size+len(rows.Body) >= MaxRequestSize {
+		c.printf(nlog.LogLevelInfo, "request full size %d + %d", r.size, len(rows.Body))
+
+		// split array and enqueue to retry
+		err = c.splitAndQueueArray(r, arr)
+		if err != nil {
+			return 0, err
+		}
+
 		return 0, ErrRequestFull
 	}
 
+	if len(r.request.Rows)+len(arr) >= MaxRowsCountPerRequest {
+		c.printf(nlog.LogLevelInfo, "request full count %d + %d", len(r.request.Rows), len(arr))
+
+		// split array and enqueue to retry
+		err = c.splitAndQueueArray(r, arr)
+		if err != nil {
+			return 0, err
+		}
+
+		return 0, ErrRequestFull
+	}
+
+	return c.putArray(r, rows, arr)
+}
+
+func (c *Client) putArray(r *tableDataInsertAllRequest, rows *insertRows, arr []interface{}) (int, error) {
 	if r.size+len(rows.Body) >= MaxRequestSize {
 		c.printf(nlog.LogLevelInfo, "request full size %d + %d", r.size, len(rows.Body))
+		return 0, ErrRequestFull
+	}
+
+	if len(r.request.Rows)+len(arr) >= MaxRowsCountPerRequest {
+		c.printf(nlog.LogLevelInfo, "request full count %d + %d", len(r.request.Rows), len(arr))
 		return 0, ErrRequestFull
 	}
 
@@ -288,6 +314,30 @@ func (c *Client) put(r *tableDataInsertAllRequest, rows *insertRows) (int, error
 	r.rowsArray = append(r.rowsArray, rows)
 	r.size += len(rows.Body)
 	return count, nil
+}
+
+func (c *Client) splitAndQueueArray(r *tableDataInsertAllRequest, arr []interface{}) error {
+	p := len(arr) / 2
+	if p < 1 {
+		return fmt.Errorf("invalid")
+	}
+
+	arr1 := arr[:p]
+	arr2 := arr[p:]
+
+	body1, err := json.Marshal(arr1)
+	if err != nil {
+		return err
+	}
+	body2, err := json.Marshal(arr2)
+	if err != nil {
+		return err
+	}
+
+	c.Add(r.project, r.dataset, r.table, body1)
+	c.Add(r.project, r.dataset, r.table, body2)
+
+	return nil
 }
 
 type insertRows struct {
