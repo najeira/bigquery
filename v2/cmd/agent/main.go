@@ -6,9 +6,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	_ "github.com/najeira/bigquery/v2"
+	//_ "github.com/najeira/bigquery/v2"
+	"bigquery/v2"
+	"goutils/nlog"
 	"io"
-	"log"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -16,15 +17,20 @@ import (
 	"time"
 )
 
+var logger nlog.Logger = nil
+
 type bigqueryWriter interface {
-	Add(string, string, string, string, map[string]interface{}) error
+	Add(string, map[string]interface{}) error
 }
 
 type dummyWriter struct {
+	project string
+	dataset string
+	table   string
 }
 
-func (w *dummyWriter) Add(project, dataset, table, insertId string, value map[string]interface{}) error {
-	log.Printf("project=%s, dataset=%s, table=%s, insertId=%s, value=%v", project, dataset, table, insertId, value)
+func (w *dummyWriter) Add(insertId string, value map[string]interface{}) error {
+	logger.Debugf("project=%s, dataset=%s, table=%s, insertId=%s, value=%v", w.project, w.dataset, w.table, insertId, value)
 	return nil
 }
 
@@ -55,7 +61,7 @@ func (c *client) startTail(file string) error {
 	}
 
 	go scan(outPipe, func(line string) { c.handleLine(line) })
-	go scan(errPipe, func(line string) { log.Println(line) })
+	go scan(errPipe, func(line string) { logger.Warnf(line) })
 
 	if err := cmd.Wait(); err != nil {
 		return err
@@ -64,31 +70,33 @@ func (c *client) startTail(file string) error {
 }
 
 func (c *client) handleLine(line string) {
+	err := c.sendLine(line)
+	if err != nil {
+		logger.Warnf("%v", err)
+	}
+}
+
+func (c *client) sendLine(line string) error {
 	var value interface{}
 	err := json.Unmarshal([]byte(line), &value)
 	if err != nil {
-		log.Println(err)
-		return
+		return err
 	}
 
 	switch record := value.(type) {
 	case map[string]interface{}:
-		err = c.send(record)
-	default:
-		err = fmt.Errorf("invalid line: %s", line)
+		return c.sendRecord(record)
 	}
 
-	if err != nil {
-		log.Println(err)
-	}
+	return fmt.Errorf("invalid line: %s", line)
 }
 
-func (c *client) send(record map[string]interface{}) error {
-	return c.writer.Add(c.project, c.dataset, c.table, c.insertId(), record)
+func (c *client) sendRecord(record map[string]interface{}) error {
+	return c.writer.Add(c.insertId(), record)
 }
 
 func (c *client) insertId() string {
-	chars := "abcdefghijklmnopqrstuvwxyz"
+	chars := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	c.buf.Reset()
 	for i := 0; i < 10; i++ {
 		ch := chars[rand.Int()%len(chars)]
@@ -118,8 +126,11 @@ func main() {
 	table := flag.String("table", "", "table")
 	email := flag.String("email", "", "email")
 	pem := flag.String("pem", "", "pem")
-
+	echo := flag.Bool("echo", false, "writes to stdout")
+	logging := flag.String("log", "info", "logging")
 	flag.Parse()
+
+	logger = nlog.NewLogger(&nlog.Config{Level: nlog.NameToLevel(*logging)})
 
 	if project == nil || *project == "" {
 		errorFlag()
@@ -140,12 +151,20 @@ func main() {
 
 	rand.Seed(time.Now().UnixNano())
 
-	client := &client{
-		project: *project,
-		dataset: *dataset,
-		table:   *table,
-		writer:  &dummyWriter{},
+	var writer bigqueryWriter
+	if echo != nil && *echo {
+		writer = &dummyWriter{project: *project, dataset: *dataset, table: *table}
+	} else {
+		bq := bigquery.NewWriter(&bigquery.Config{
+			Project: *project,
+			Dataset: *dataset,
+			Table:   *table,
+		})
+		bq.SetLogger(logger)
+		writer = bq
 	}
+
+	client := &client{writer: writer}
 
 	var wg sync.WaitGroup
 	for _, file := range files {
@@ -153,7 +172,7 @@ func main() {
 		go func() {
 			err := client.startTail(file)
 			if err != nil {
-				log.Println(err)
+				logger.Errorf("%v", err)
 			}
 			wg.Done()
 		}()
