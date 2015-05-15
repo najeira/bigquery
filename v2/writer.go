@@ -37,11 +37,11 @@ type Logger interface {
 }
 
 type Config struct {
-	email   string
-	pem     []byte
-	project string
-	dataset string
-	table   string
+	Email   string
+	Pem     []byte
+	Project string
+	Dataset string
+	Table   string
 }
 
 type Writer struct {
@@ -78,8 +78,8 @@ func (w *Writer) ensureConnect() error {
 
 func (w *Writer) connect() error {
 	cfg := jwt.Config{
-		Email:      w.config.email,
-		PrivateKey: w.config.pem,
+		Email:      w.config.Email,
+		PrivateKey: w.config.Pem,
 		Scopes:     []string{bq.BigqueryScope},
 		TokenURL:   "https://accounts.google.com/o/oauth2/token",
 	}
@@ -251,7 +251,7 @@ func (w *Writer) updateRemainingCount() {
 
 func (w *Writer) insertAll(c *chunk) bool {
 	req := &bq.TableDataInsertAllRequest{Rows: c.rows}
-	call := w.service.Tabledata.InsertAll(w.config.project, w.config.dataset, w.config.table, req)
+	call := w.service.Tabledata.InsertAll(w.config.Project, w.config.Dataset, w.config.Table, req)
 	resp, err := call.Do()
 	return w.handleInsertAll(c, resp, err)
 }
