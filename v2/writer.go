@@ -36,29 +36,35 @@ type Logger interface {
 	Criticalf(format string, v ...interface{})
 }
 
+type Config struct {
+	email   string
+	pem     []byte
+	project string
+	dataset string
+	table   string
+}
+
 type Writer struct {
-	email        string
-	pem          []byte
+	config       *Config
 	service      *bq.Service
-	queues       map[string]*queue
+	queue        *queue
 	logger       Logger
 	errorHandler ErrorHandler
 	stats        writerStats
 	delay        int
-	mu           sync.RWMutex
+	mu           sync.Mutex
 	wg           sync.WaitGroup
 	running      bool
 }
 
 // Creates and returns a new Writer.
-func NewWriter(email string, pem []byte) *Writer {
+func NewWriter(config *Config) *Writer {
 	return &Writer{
-		email:   email,
-		pem:     pem,
+		config:  config,
 		service: nil,
-		delay:   0,
-		queues:  make(map[string]*queue, 0),
+		queue:   newQueue(),
 		logger:  nil,
+		delay:   0,
 		running: false,
 	}
 }
@@ -72,8 +78,8 @@ func (w *Writer) ensureConnect() error {
 
 func (w *Writer) connect() error {
 	cfg := jwt.Config{
-		Email:      w.email,
-		PrivateKey: w.pem,
+		Email:      w.config.email,
+		PrivateKey: w.config.pem,
 		Scopes:     []string{bq.BigqueryScope},
 		TokenURL:   "https://accounts.google.com/o/oauth2/token",
 	}
@@ -101,18 +107,8 @@ func (w *Writer) SetErrorHandler(h ErrorHandler) {
 // The row is stored queue in the writer.
 // Rows in the queue will be sent asynchronously to BigQuery soon.
 // The value is not able to encode json or too large then Add returns error.
-func (w *Writer) Add(project, dataset, table, insertId string, value map[string]interface{}) error {
-	key := queueKey(project, dataset, table)
-
-	w.mu.Lock()
-	q, ok := w.queues[key]
-	if !ok {
-		q = newQueue(project, dataset, table)
-		w.queues[key] = q
-	}
-	w.mu.Unlock()
-
-	err := q.add(insertId, value)
+func (w *Writer) Add(insertId string, value map[string]interface{}) error {
+	err := w.queue.add(insertId, value)
 	w.runFlusher()
 	return err
 }
@@ -174,7 +170,7 @@ func (w *Writer) flush() {
 
 	w.updateRemainingCount()
 
-	noErr := w.flushQueues()
+	noErr := w.flushQueue()
 
 	elapsed := time.Now().Sub(start)
 	w.stats.setLatency(elapsed)
@@ -195,19 +191,18 @@ func (w *Writer) flush() {
 	}
 }
 
-func (w *Writer) flushQueues() bool {
+func (w *Writer) flushQueue() bool {
 	var errCnt int32 = 0
 	size := 0
 	count := 0
 
 	var wg sync.WaitGroup
-	w.mu.RLock()
 
-	for _, q := range w.queues {
-		c := q.popChunk()
+	for {
+		c := w.queue.popChunk()
 		if c == nil {
 			w.debugf("no chunks")
-			continue
+			break
 		}
 
 		size += c.size
@@ -225,14 +220,13 @@ func (w *Writer) flushQueues() bool {
 
 		wg.Add(1)
 		go func() {
-			if !w.insertAll(q, c) {
+			if !w.insertAll(c) {
 				atomic.AddInt32(&errCnt, 1)
 			}
 			wg.Done()
 		}()
 	}
 
-	w.mu.RUnlock()
 	wg.Wait()
 
 	return errCnt <= 0
@@ -243,13 +237,7 @@ func (w *Writer) empty() bool {
 }
 
 func (w *Writer) count() int {
-	cnt := 0
-	w.mu.RLock()
-	for _, q := range w.queues {
-		cnt += q.count()
-	}
-	w.mu.RUnlock()
-	return cnt
+	return w.queue.count()
 }
 
 // Returns statistics of the writer.
@@ -261,16 +249,16 @@ func (w *Writer) updateRemainingCount() {
 	w.stats.setRemainingCount(int64(w.count()))
 }
 
-func (w *Writer) insertAll(q *queue, c *chunk) bool {
+func (w *Writer) insertAll(c *chunk) bool {
 	req := &bq.TableDataInsertAllRequest{Rows: c.rows}
-	call := w.service.Tabledata.InsertAll(q.project, q.dataset, q.table, req)
+	call := w.service.Tabledata.InsertAll(w.config.project, w.config.dataset, w.config.table, req)
 	resp, err := call.Do()
-	return w.handleInsertAll(q, c, resp, err)
+	return w.handleInsertAll(c, resp, err)
 }
 
-func (w *Writer) handleInsertAll(q *queue, c *chunk, resp *bq.TableDataInsertAllResponse, err error) bool {
+func (w *Writer) handleInsertAll(c *chunk, resp *bq.TableDataInsertAllResponse, err error) bool {
 	if err != nil {
-		w.handleInsertAllError(q, c, err)
+		w.handleInsertAllError(c, err)
 		return false
 	}
 
@@ -279,10 +267,10 @@ func (w *Writer) handleInsertAll(q *queue, c *chunk, resp *bq.TableDataInsertAll
 		return false
 	}
 
-	return w.handleInsertAllResponse(q, c, resp)
+	return w.handleInsertAllResponse(c, resp)
 }
 
-func (w *Writer) handleInsertAllError(q *queue, c *chunk, err error) {
+func (w *Writer) handleInsertAllError(c *chunk, err error) {
 	cnt := int64(len(c.rows))
 	w.stats.incrFailedCount(cnt)
 
@@ -290,7 +278,7 @@ func (w *Writer) handleInsertAllError(q *queue, c *chunk, err error) {
 		w.warnf("%d %s", gerr.Code, gerr.Message)
 		if 500 <= gerr.Code && gerr.Code <= 599 {
 			// 5xx is temporary error. retry the chunk.
-			q.pushChunk(c)
+			w.queue.pushChunk(c)
 			w.stats.incrRetriedCount(cnt)
 		}
 	} else {
@@ -303,7 +291,7 @@ func (w *Writer) handleInsertAllError(q *queue, c *chunk, err error) {
 	}
 }
 
-func (w *Writer) handleInsertAllResponse(q *queue, c *chunk, resp *bq.TableDataInsertAllResponse) bool {
+func (w *Writer) handleInsertAllResponse(c *chunk, resp *bq.TableDataInsertAllResponse) bool {
 	retriedCount := 0
 
 	for _, ie := range resp.InsertErrors {
@@ -324,7 +312,7 @@ func (w *Writer) handleInsertAllResponse(q *queue, c *chunk, resp *bq.TableDataI
 				}
 			}
 			if retry {
-				q.addRow(r)
+				w.queue.addRow(r)
 				retriedCount += 1
 			}
 		}
@@ -523,21 +511,12 @@ func (c *chunk) ready() bool {
 }
 
 type queue struct {
-	project string
-	dataset string
-	table   string
-
 	mu     sync.RWMutex
 	chunks []*chunk
 }
 
-func newQueue(project, dataset, table string) *queue {
-	return &queue{
-		project: project,
-		dataset: dataset,
-		table:   table,
-		chunks:  make([]*chunk, 0),
-	}
+func newQueue() *queue {
+	return &queue{chunks: make([]*chunk, 0)}
 }
 
 func (q *queue) empty() bool {
@@ -617,8 +596,4 @@ func (q *queue) count() int {
 	}
 	q.mu.RUnlock()
 	return ret
-}
-
-func queueKey(project, dataset, table string) string {
-	return fmt.Sprintf("%s|%s|%s", project, dataset, table)
 }
