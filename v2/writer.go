@@ -216,7 +216,7 @@ func (w *Writer) flushQueue() bool {
 			break
 		}
 
-		w.debugf("flushing")
+		w.debugf("flushing %d rows", count)
 
 		wg.Add(1)
 		go func() {
