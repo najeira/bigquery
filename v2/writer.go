@@ -45,7 +45,7 @@ type Config struct {
 }
 
 type Writer struct {
-	config       *Config
+	config       Config
 	service      *bq.Service
 	queue        *queue
 	logger       Logger
@@ -58,7 +58,7 @@ type Writer struct {
 }
 
 // Creates and returns a new Writer.
-func NewWriter(config *Config) *Writer {
+func NewWriter(config Config) *Writer {
 	return &Writer{
 		config:  config,
 		service: nil,
