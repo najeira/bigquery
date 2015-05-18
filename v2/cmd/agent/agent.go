@@ -6,9 +6,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	//_ "github.com/najeira/bigquery/v2"
-	"bigquery/v2"
-	"goutils/nlog"
+	"github.com/najeira/bigquery/v2"
+	"github.com/najeira/goutils/nlog"
 	"io"
 	"math/rand"
 	"os"
@@ -23,21 +22,20 @@ type bigqueryWriter interface {
 	Add(string, map[string]interface{}) error
 }
 
-type dummyWriter struct {
+type echoWriter struct {
 	project string
 	dataset string
 	table   string
 }
 
-func (w *dummyWriter) Add(insertId string, value map[string]interface{}) error {
-	logger.Debugf("project=%s, dataset=%s, table=%s, insertId=%s, value=%v", w.project, w.dataset, w.table, insertId, value)
+func (w *echoWriter) Add(insertId string, value map[string]interface{}) error {
+	if logger != nil {
+		logger.Debugf("project=%s, dataset=%s, table=%s, insertId=%s, value=%v", w.project, w.dataset, w.table, insertId, value)
+	}
 	return nil
 }
 
 type client struct {
-	project string
-	dataset string
-	table   string
 	writer  bigqueryWriter
 	comment rune
 	buf     bytes.Buffer
@@ -60,8 +58,7 @@ func (c *client) startTail(file string) error {
 		return err
 	}
 
-	go scan(outPipe, func(line string) { c.handleLine(line) })
-	go scan(errPipe, func(line string) { logger.Warnf(line) })
+	c.handlePipes(outPipe, errPipe)
 
 	if err := cmd.Wait(); err != nil {
 		return err
@@ -69,14 +66,38 @@ func (c *client) startTail(file string) error {
 	return nil
 }
 
+func (c *client) handlePipes(outPipe, errPipe io.Reader) {
+	go scan(outPipe, func(line string) { c.handleLine(line) })
+	go scan(errPipe, func(line string) {
+		if logger != nil {
+			logger.Warnf(line)
+		}
+	})
+}
+
 func (c *client) handleLine(line string) {
 	err := c.sendLine(line)
 	if err != nil {
-		logger.Warnf("%v", err)
+		if logger != nil {
+			logger.Warnf("%v", err)
+		}
 	}
 }
 
+func trimCrLf(line string) string {
+	for len(line) > 0 {
+		ch := line[len(line)-1]
+		if ch != '\n' && ch != '\r' {
+			return line
+		}
+		line = line[:len(line)]
+	}
+	return line
+}
+
 func (c *client) sendLine(line string) error {
+	line = trimCrLf(line)
+
 	var value interface{}
 	err := json.Unmarshal([]byte(line), &value)
 	if err != nil {
@@ -120,6 +141,28 @@ func errorFlag() {
 	os.Exit(1)
 }
 
+func startClient(writer bigqueryWriter, files []string) {
+	client := &client{writer: writer}
+	var wg sync.WaitGroup
+	for _, file := range files {
+		wg.Add(1)
+		go func() {
+			err := client.startTail(file)
+			if err != nil {
+				if logger != nil {
+					logger.Errorf("%v", err)
+				}
+			}
+			wg.Done()
+		}()
+	}
+	wg.Wait()
+}
+
+func initLogger(level string) {
+	logger = nlog.NewLogger(&nlog.Config{Level: nlog.NameToLevel(level)})
+}
+
 func main() {
 	project := flag.String("project", "", "project")
 	dataset := flag.String("dataset", "", "dataset")
@@ -130,7 +173,7 @@ func main() {
 	logging := flag.String("log", "info", "logging")
 	flag.Parse()
 
-	logger = nlog.NewLogger(&nlog.Config{Level: nlog.NameToLevel(*logging)})
+	initLogger(*logging)
 
 	if project == nil || *project == "" {
 		errorFlag()
@@ -153,9 +196,9 @@ func main() {
 
 	var writer bigqueryWriter
 	if echo != nil && *echo {
-		writer = &dummyWriter{project: *project, dataset: *dataset, table: *table}
+		writer = &echoWriter{project: *project, dataset: *dataset, table: *table}
 	} else {
-		bq := bigquery.NewWriter(&bigquery.Config{
+		bq := bigquery.NewWriter(bigquery.Config{
 			Project: *project,
 			Dataset: *dataset,
 			Table:   *table,
@@ -164,19 +207,7 @@ func main() {
 		writer = bq
 	}
 
-	client := &client{writer: writer}
+	startClient(writer, files)
 
-	var wg sync.WaitGroup
-	for _, file := range files {
-		wg.Add(1)
-		go func() {
-			err := client.startTail(file)
-			if err != nil {
-				logger.Errorf("%v", err)
-			}
-			wg.Done()
-		}()
-	}
-	wg.Wait()
 	fmt.Println("done")
 }
