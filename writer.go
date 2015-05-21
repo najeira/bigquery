@@ -23,6 +23,7 @@ const (
 var (
 	ErrClosed         = fmt.Errorf("closed")
 	ErrRecordTooLarge = fmt.Errorf("record is too large")
+	ErrNoService      = fmt.Errorf("no service")
 	errChunkFull      = fmt.Errorf("chunk is full")
 )
 
@@ -41,21 +42,23 @@ type Logger interface {
 }
 
 type Service interface {
-	InsertAll(string, string, string, *bq.TableDataInsertAllRequest) *bq.TabledataInsertAllCall
+	InsertAll(string, string, string, *bq.TableDataInsertAllRequest) (*bq.TableDataInsertAllResponse, error)
 }
 
-// Config specify authorization and table of BigQuery.
-type Config struct {
-	Email   string
-	Pem     []byte
-	Project string
-	Dataset string
-	Table   string
+type bigqueryService struct {
+	service *bq.Service
+}
+
+func (s *bigqueryService) InsertAll(project string, dataset string, table string, req *bq.TableDataInsertAllRequest) (*bq.TableDataInsertAllResponse, error) {
+	call := s.service.Tabledata.InsertAll(project, dataset, table, req)
+	return call.Do()
 }
 
 // Writer writes rows to BigQuery.
 type Writer struct {
-	config       Config
+	project      string
+	dataset      string
+	table        string
 	service      Service
 	queue        *queue
 	logger       Logger
@@ -70,9 +73,11 @@ type Writer struct {
 }
 
 // Creates and returns a new Writer.
-func NewWriter(config Config) *Writer {
+func NewWriter(project, dataset, table string) *Writer {
 	return &Writer{
-		config:  config,
+		project: project,
+		dataset: dataset,
+		table:   table,
 		service: nil,
 		queue:   newQueue(),
 		logger:  nil,
@@ -83,17 +88,10 @@ func NewWriter(config Config) *Writer {
 	}
 }
 
-func (w *Writer) Connect() error {
-	if w.service == nil {
-		return w.connect()
-	}
-	return nil
-}
-
-func (w *Writer) connect() error {
+func (w *Writer) Connect(email string, pem []byte) error {
 	cfg := jwt.Config{
-		Email:      w.config.Email,
-		PrivateKey: w.config.Pem,
+		Email:      email,
+		PrivateKey: pem,
 		Scopes:     []string{bq.BigqueryScope},
 		TokenURL:   "https://accounts.google.com/o/oauth2/token",
 	}
@@ -104,9 +102,13 @@ func (w *Writer) connect() error {
 		w.warnf("connect error %v", err)
 		return err
 	}
-	w.service = bq.Tabledata
+	w.service = &bigqueryService{bq}
 	w.debugf("connected")
 	return nil
+}
+
+func (w *Writer) SetService(service Service) {
+	w.service = service
 }
 
 func (w *Writer) SetLogger(l Logger) {
@@ -115,10 +117,6 @@ func (w *Writer) SetLogger(l Logger) {
 
 func (w *Writer) SetErrorHandler(h ErrorHandler) {
 	w.errorHandler = h
-}
-
-func (w *Writer) SetService(service Service) {
-	w.service = service
 }
 
 func (w *Writer) callErrorHandler(err error) {
@@ -132,6 +130,10 @@ func (w *Writer) callErrorHandler(err error) {
 // Rows in the queue will be sent asynchronously to BigQuery soon.
 // The value is not able to encode json or too large then Add returns error.
 func (w *Writer) Add(insertId string, value map[string]interface{}) error {
+	if w.service == nil {
+		return ErrNoService
+	}
+
 	w.mu.RLock()
 	closed := w.closed
 	running := w.running
@@ -189,12 +191,6 @@ func (w *Writer) flusher() {
 
 func (w *Writer) flusherLoop() {
 	w.debugf("flusher start")
-
-	// ensure connect
-	if err := w.Connect(); err != nil {
-		w.errorf("connect error %v", err)
-		return
-	}
 
 	// flushing until the writer has rows.
 	for !w.empty() {
@@ -255,7 +251,8 @@ func (w *Writer) flush() {
 
 	w.updateRemainingCount()
 
-	noErr := w.flushQueue()
+	count, size, errs := w.flushQueue()
+	w.debugf("flush sent %d rows, %d bytes, %d errors", count, size, errs)
 
 	elapsed := time.Now().Sub(start)
 	w.stats.setLatency(elapsed)
@@ -269,17 +266,17 @@ func (w *Writer) flush() {
 
 	w.updateRemainingCount()
 
-	if noErr {
-		w.delay = 0
-	} else {
+	if errs > 0 {
 		w.delay += 1
+	} else {
+		w.delay = 0
 	}
 }
 
-func (w *Writer) flushQueue() bool {
+func (w *Writer) flushQueue() (count int, size int, errs int) {
 	var errCnt int32 = 0
-	size := 0
-	count := 0
+	size = 0
+	count = 0
 
 	var wg sync.WaitGroup
 
@@ -314,7 +311,7 @@ func (w *Writer) flushQueue() bool {
 
 	wg.Wait()
 
-	return errCnt <= 0
+	return size, count, int(errCnt)
 }
 
 func (w *Writer) empty() bool {
@@ -336,8 +333,7 @@ func (w *Writer) updateRemainingCount() {
 
 func (w *Writer) insertAll(c *chunk) bool {
 	req := &bq.TableDataInsertAllRequest{Rows: c.rows}
-	call := w.service.InsertAll(w.config.Project, w.config.Dataset, w.config.Table, req)
-	resp, err := call.Do()
+	resp, err := w.service.InsertAll(w.project, w.dataset, w.table, req)
 	return w.handleInsertAll(c, resp, err)
 }
 
