@@ -21,21 +21,30 @@ const (
 )
 
 var (
+	ErrClosed         = fmt.Errorf("closed")
+	ErrRecordTooLarge = fmt.Errorf("record is too large")
 	errChunkFull      = fmt.Errorf("chunk is full")
-	errRecordTooLarge = fmt.Errorf("record is too large")
 )
 
+// ErrorHandler is to get errors at writer.
 type ErrorHandler func(err error)
 
+// Logger define logging interface of this package.
 type Logger interface {
 	Verbosef(format string, v ...interface{})
 	Debugf(format string, v ...interface{})
 	Infof(format string, v ...interface{})
+	Noticef(format string, v ...interface{})
 	Warnf(format string, v ...interface{})
 	Errorf(format string, v ...interface{})
 	Criticalf(format string, v ...interface{})
 }
 
+type Service interface {
+	InsertAll(string, string, string, *bq.TableDataInsertAllRequest) *bq.TabledataInsertAllCall
+}
+
+// Config specify authorization and table of BigQuery.
 type Config struct {
 	Email   string
 	Pem     []byte
@@ -44,17 +53,20 @@ type Config struct {
 	Table   string
 }
 
+// Writer writes rows to BigQuery.
 type Writer struct {
 	config       Config
-	service      *bq.Service
+	service      Service
 	queue        *queue
 	logger       Logger
 	errorHandler ErrorHandler
 	stats        writerStats
 	delay        int
-	mu           sync.Mutex
+	mu           sync.RWMutex
 	wg           sync.WaitGroup
 	running      bool
+	closed       bool
+	closing      chan bool
 }
 
 // Creates and returns a new Writer.
@@ -66,10 +78,12 @@ func NewWriter(config Config) *Writer {
 		logger:  nil,
 		delay:   0,
 		running: false,
+		closed:  false,
+		closing: make(chan bool, 1),
 	}
 }
 
-func (w *Writer) ensureConnect() error {
+func (w *Writer) Connect() error {
 	if w.service == nil {
 		return w.connect()
 	}
@@ -90,7 +104,7 @@ func (w *Writer) connect() error {
 		w.warnf("connect error %v", err)
 		return err
 	}
-	w.service = bq
+	w.service = bq.Tabledata
 	w.debugf("connected")
 	return nil
 }
@@ -103,65 +117,136 @@ func (w *Writer) SetErrorHandler(h ErrorHandler) {
 	w.errorHandler = h
 }
 
+func (w *Writer) SetService(service Service) {
+	w.service = service
+}
+
+func (w *Writer) callErrorHandler(err error) {
+	if w.errorHandler != nil {
+		w.errorHandler(err)
+	}
+}
+
 // Adds the row to the writer.
 // The row is stored queue in the writer.
 // Rows in the queue will be sent asynchronously to BigQuery soon.
 // The value is not able to encode json or too large then Add returns error.
 func (w *Writer) Add(insertId string, value map[string]interface{}) error {
+	w.mu.RLock()
+	closed := w.closed
+	running := w.running
+	w.mu.RUnlock()
+
+	if closed {
+		return ErrClosed
+	}
+
 	err := w.queue.add(insertId, value)
-	w.runFlusher()
+
+	if !running {
+		w.runFlusher()
+	}
+
 	return err
 }
 
 func (w *Writer) runFlusher() {
 	w.mu.Lock()
-	r := w.running
+	closed := w.closed
+	running := w.running
 	w.running = true
 	w.mu.Unlock()
 
-	if !r {
-		err := w.ensureConnect()
-		if err != nil {
-			return
-		}
-
-		w.debugf("wakeup flusher")
-		w.wg.Add(1)
-		go w.flusher()
+	if closed || running {
+		return
 	}
+
+	w.debugf("wakeup flusher")
+
+	w.wg.Add(1)
+	go w.flusher()
 }
 
 func (w *Writer) flusher() {
 	w.debugf("flusher start")
 
-	for {
-		wait := (w.delay * w.delay) + 1
-		w.debugf("wait %d seconds", wait)
-		<-time.After(time.Duration(wait) * time.Second)
+	w.flusherLoop()
 
-		w.flush()
-
-		if w.empty() {
-			w.debugf("empty")
-			break
-		}
-	}
-
+	// this loop will be done soon, running is false.
 	w.mu.Lock()
 	w.running = false
 	w.mu.Unlock()
 
+	// launch flushing loop if Add called between flusherLoop() and here.
 	if !w.empty() {
 		w.runFlusher()
 	}
 
 	w.debugf("flusher end")
+
 	w.wg.Done()
 }
 
-// Waits all records in the writer are sent.
+func (w *Writer) flusherLoop() {
+	w.debugf("flusher start")
+
+	// ensure connect
+	if err := w.Connect(); err != nil {
+		w.errorf("connect error %v", err)
+		return
+	}
+
+	// flushing until the writer has rows.
+	for !w.empty() {
+
+		// waiting duration increase if error occured.
+		wait := (w.delay * w.delay) + 1
+		sleep := time.Duration(wait) * time.Second
+		w.debugf("wait %d seconds", wait)
+
+		select {
+		case <-time.After(sleep):
+			w.flush()
+		case <-w.closing:
+			// Close was called. it should return from loop.
+			w.debugf("flusher closing")
+			return
+		}
+	}
+
+	w.debugf("empty")
+}
+
+// Waits sending all records in the writer to BQ.
 func (w *Writer) Wait() {
 	w.wg.Wait()
+}
+
+func (w *Writer) Close() {
+	w.mu.Lock()
+	closed := w.closed
+	w.closed = true
+	w.mu.Unlock()
+
+	if closed {
+		// Close was called already.
+		return
+	}
+
+	// send value to closing to finish flushing loop.
+	// it does nothing if the writer is empty and not block.
+	w.closing <- true
+
+	// wait finish completely.
+	w.wg.Wait()
+}
+
+func (w *Writer) Dump() ([]byte, error) {
+	return w.queue.dump()
+}
+
+func (w *Writer) Load(data []byte) error {
+	return w.queue.load(data)
 }
 
 func (w *Writer) flush() {
@@ -251,7 +336,7 @@ func (w *Writer) updateRemainingCount() {
 
 func (w *Writer) insertAll(c *chunk) bool {
 	req := &bq.TableDataInsertAllRequest{Rows: c.rows}
-	call := w.service.Tabledata.InsertAll(w.config.Project, w.config.Dataset, w.config.Table, req)
+	call := w.service.InsertAll(w.config.Project, w.config.Dataset, w.config.Table, req)
 	resp, err := call.Do()
 	return w.handleInsertAll(c, resp, err)
 }
@@ -286,9 +371,7 @@ func (w *Writer) handleInsertAllError(c *chunk, err error) {
 		w.errorf(err.Error())
 	}
 
-	if w.errorHandler != nil {
-		w.errorHandler(err)
-	}
+	w.callErrorHandler(err)
 }
 
 func (w *Writer) handleInsertAllResponse(c *chunk, resp *bq.TableDataInsertAllResponse) bool {
@@ -482,7 +565,7 @@ func (c *chunk) add(row *bq.TableDataInsertAllRequestRows) error {
 	size := len(data)
 
 	if size > MaxRowBytes {
-		return errRecordTooLarge
+		return ErrRecordTooLarge
 	} else if len(c.rows) >= MaxRowsCountPerRequest {
 		// mark the chunk as full
 		// this chunk will be sent at next batch
@@ -589,11 +672,43 @@ func (q *queue) addRow(row *bq.TableDataInsertAllRequestRows) error {
 }
 
 func (q *queue) count() int {
-	var ret int = 0
 	q.mu.RLock()
+	ret := q.countImpl()
+	q.mu.RUnlock()
+	return ret
+}
+
+func (q *queue) countImpl() int {
+	var ret int = 0
 	for _, c := range q.chunks {
 		ret += len(c.rows)
 	}
-	q.mu.RUnlock()
 	return ret
+}
+
+func (q *queue) dump() ([]byte, error) {
+	q.mu.Lock()
+
+	rows := make([]*bq.TableDataInsertAllRequestRows, 0, q.countImpl())
+
+	for _, c := range q.chunks {
+		if len(c.rows) > 0 {
+			rows = append(rows, c.rows...)
+		}
+	}
+
+	q.mu.Unlock()
+
+	return json.Marshal(rows)
+}
+
+func (q *queue) load(data []byte) error {
+	var rows []*bq.TableDataInsertAllRequestRows
+	if err := json.Unmarshal(data, rows); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		q.addRow(row)
+	}
+	return nil
 }
