@@ -2,20 +2,20 @@
 
 A client for sending rows to BigQuery.
 
-This is under construction.
+This is **NOT stable**.
 
 # Usage
 
 ```go
-// create a writer with config
-config := Config{
-	Email:  "your client id"
-	Pem:    your_private_key
-	Project "your project"
-	Dataset "your dataset"
-	Table   "your table"
+// create a writer with parameters
+writer := bigquery.NewWriter("your project", "your dataset", "your table")
+
+// connect to BigQuery
+err := writer.Connect("your account", pem)
+if err != nil {
+	// authorization failed
+	return err
 }
-writer := bigquery.NewWriter(config)
 
 // add rows
 writer.Add("insert id", row)
