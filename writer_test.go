@@ -470,7 +470,7 @@ func TestWriterFlushQueueWhenSingleChunkFull(t *testing.T) {
 	w := NewWriter("p", "d", "t")
 	w.SetService(s)
 
-	for i := 0; i < MaxRowsCountPerRequest + 1; i++ {
+	for i := 0; i < MaxRowsCountPerRequest+1; i++ {
 		entity := map[string]interface{}{"foo": "bar", "baz": 123}
 		w.queue.add("aaa", entity)
 	}
@@ -535,7 +535,7 @@ func TestWriterFlushWhenSingleChunkFull(t *testing.T) {
 	w := NewWriter("p", "d", "t")
 	w.SetService(s)
 
-	for i := 0; i < MaxRowsCountPerRequest + 1; i++ {
+	for i := 0; i < MaxRowsCountPerRequest+1; i++ {
 		entity := map[string]interface{}{"foo": "bar", "baz": 123}
 		w.queue.add("aaa", entity)
 	}

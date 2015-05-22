@@ -190,8 +190,6 @@ func (w *Writer) flusher() {
 }
 
 func (w *Writer) flusherLoop() {
-	w.debugf("flusher start")
-
 	// flushing until the writer has rows.
 	for !w.empty() {
 
@@ -273,7 +271,7 @@ func (w *Writer) flush() {
 	}
 }
 
-func (w *Writer) flushQueue() (count int, size int, errs int) {
+func (w *Writer) flushQueue() (size int, count int, errs int) {
 	var errCnt int32 = 0
 	size = 0
 	count = 0
@@ -311,7 +309,8 @@ func (w *Writer) flushQueue() (count int, size int, errs int) {
 
 	wg.Wait()
 
-	return size, count, int(errCnt)
+	errs = int(errCnt)
+	return
 }
 
 func (w *Writer) empty() bool {
